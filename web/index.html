@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>YuJa Prospect Intelligence — Multi-tenant</title>
+  <style>
+    :root { --primary:#1e40af; --border:#e5e7eb; --light:#f3f4f6; --text:#111827; --gray:#6b7280;}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;margin:0;color:var(--text)}
+    .header{max-width:1200px;margin:16px auto;background:#fff;border:1px solid var(--border);box-shadow:0 10px 40px rgba(0,0,0,.08);border-radius:12px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
+    .logo{font-weight:800;color:var(--primary)}
+    .pill{border:1px solid var(--border);background:#fff;border-radius:999px;padding:.25rem .5rem;font-size:.85rem;margin:2px;display:inline-block}
+    .btn{padding:.5rem .8rem;border-radius:8px;border:2px solid var(--border);background:#fff;cursor:pointer;font-weight:600}
+    .input{padding:.5rem .75rem;border:2px solid var(--border);border-radius:8px;min-width:200px}
+    .container{max-width:1200px;margin:0 auto;padding:0 16px 32px}
+    .card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.05)}
+    table{width:100%;border-collapse:collapse}
+    th{background:var(--light);text-align:left;padding:.7rem}
+    td{padding:.7rem;border-bottom:1px solid var(--border)}
+    .score{padding:.15rem .5rem;border-radius:999px;font-weight:700}
+    .sH{background:#dcfce7;color:#166534}.sM{background:#fef3c7;color:#92400e}.sL{background:#f3f4f6;color:#374151}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">🎯 YPI — Multi-tenant</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="tenantSel" class="input" style="display:none"></select>
+      <div id="authArea"><button id="signin" class="btn">Sign in with Google</button></div>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="card" style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" data-product="verity">Verity</button>
+      <button class="btn" data-product="panorama">Panorama</button>
+      <button class="btn" data-product="lumina">Lumina</button>
+      <input id="search" class="input" placeholder="Search name or domain"/>
+      <select id="region" class="input"><option value="all">All Regions</option><option>West</option><option>Northeast</option><option>South</option><option>Midwest</option></select>
+      <select id="stage" class="input"><option value="all">All Stages</option><option>P1</option><option>nurture</option><option>research</option><option>hold</option></select>
+      <button id="upload" class="btn">📤 Upload JSON/CSV</button>
+      <button id="export" class="btn">📥 Export CSV</button>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <table>
+        <thead><tr><th>Institution</th><th>Region</th><th>Score</th><th>Stage</th><th>Why Now</th><th>LMS</th><th>Owner</th><th>Actions</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script type="module">
+    // Replace with your Firebase config
+    const FIREBASE_CONFIG = { apiKey:"REPLACE_ME", authDomain:"REPLACE_ME.firebaseapp.com", projectId:"REPLACE_ME" };
+    const ALLOWED_DOMAIN = null; // e.g. "yourcompany.com"
+
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, collection, doc, getDoc, query, where, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+
+    const app = initializeApp(FIREBASE_CONFIG);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const functions = getFunctions(app);
+
+    let user=null, roleDoc=null, tenants=[], currentTenant=null, currentProduct="verity", rows=[];
+
+    const tenantSel = document.getElementById("tenantSel");
+    const authArea = document.getElementById("authArea");
+    const signin = document.getElementById("signin"); signin.onclick = () => signInWithPopup(auth, new GoogleAuthProvider());
+
+    onAuthStateChanged(auth, async (u) => {
+      if (!u) { authArea.innerHTML = '<button class="btn" id="signin2">Sign in with Google</button>'; document.getElementById("signin2").onclick=()=>signInWithPopup(auth,new GoogleAuthProvider()); tenantSel.style.display="none"; return; }
+      if (ALLOWED_DOMAIN && !u.email.endsWith("@"+ALLOWED_DOMAIN)) { alert("Restricted to workspace"); await signOut(auth); return; }
+      user = u;
+      roleDoc = (await getDoc(doc(db,"roles",u.uid))).data() || {};
+      tenants = Object.keys(roleDoc.tenants || {});
+      if (!tenants.length) { alert("No tenant access assigned. Ask an admin to add you."); return; }
+      currentTenant = tenants[0];
+      if (tenants.length > 1) {
+        tenantSel.style.display="inline-block";
+        tenantSel.innerHTML = tenants.map(t=>`<option>${t}</option>`).join("");
+        tenantSel.value = currentTenant;
+        tenantSel.onchange = () => { currentTenant = tenantSel.value; load(currentProduct); };
+      }
+      authArea.innerHTML = `<span class="pill">${u.displayName||u.email} • ${roleDoc.tenants[currentTenant]}</span> <button class="btn" id="out">Sign out</button>`;
+      document.getElementById("out").onclick = () => signOut(auth);
+      load(currentProduct);
+    });
+
+    document.querySelectorAll('[data-product]').forEach(b => b.onclick = () => { currentProduct = b.dataset.product; load(currentProduct); });
+    document.getElementById("search").oninput = () => render();
+    document.getElementById("region").onchange = () => render();
+    document.getElementById("stage").onchange = () => render();
+
+    let unsub = null;
+    async function load(product) {
+      if (!user || !currentTenant) return;
+      if (unsub) unsub();
+      const q = query(collection(db, `tenants/${currentTenant}/prospects`), where("product","==",product));
+      unsub = onSnapshot(q, snap => { rows = snap.docs.map(d => ({ id:d.id, ...d.data() })); render(); });
+    }
+
+    function render() {
+      const term = (document.getElementById("search").value||"").toLowerCase();
+      const region = document.getElementById("region").value;
+      const stage = document.getElementById("stage").value;
+      const tbody = document.getElementById("rows");
+      const filtered = rows.filter(p => (!term || (p.institutionName||"").toLowerCase().includes(term) || (p.domain||"").toLowerCase().includes(term)) &&
+        (region==="all" || p.region===region) && (stage==="all" || p.stage===stage));
+      tbody.innerHTML = filtered.map(p => `
+        <tr data-id="${p.id}">
+          <td><b>${p.institutionName||""}</b><div style="color:#6b7280;font-size:.85rem">${p.domain||""}</div></td>
+          <td>${p.region||""}</td>
+          <td><span class="score ${p.score>=80?'sH':p.score>=60?'sM':'sL'}">${p.score||0}</span></td>
+          <td>${p.stage||""}</td>
+          <td style="max-width:360px">${(p.whyNow||"").replace(/</g,"&lt;")}</td>
+          <td>${p.lms||""}</td>
+          <td>${p.ownerName||""}</td>
+          <td>
+            ${!p.ownerUid ? '<button class="btn small claim">Assign to me</button>' : ''}
+            <button class="btn small done">Mark Next Step Done</button>
+          </td>
+        </tr>`).join("");
+
+      tbody.querySelectorAll("tr").forEach(tr => {
+        const id = tr.dataset.id;
+        const claim = tr.querySelector(".claim");
+        if (claim) claim.onclick = async () => {
+          const ref = doc(db, `tenants/${currentTenant}/prospects`, id);
+          try { await updateDoc(ref, { ownerUid: user.uid, ownerName: user.displayName || user.email }); } catch(e){ alert("Claim failed: " + e.message); }
+        };
+        tr.querySelector(".done").onclick = async () => {
+          const ref = doc(db, `tenants/${currentTenant}/prospects`, id);
+          try { await updateDoc(ref, { lastContactedAt: new Date(), nextStep: "", nextStepDueAt: null }); } catch(e){ alert("Update failed: " + e.message); }
+        };
+      });
+    }
+
+    document.getElementById("upload").onclick = async () => {
+      if (!user || !currentTenant) return alert("Sign in first");
+      const text = prompt("Paste JSON (array/object) or CSV. tenantId will be set to current tenant automatically if missing.");
+      if (!text) return;
+      try {
+        let payload;
+        try { payload = JSON.parse(text); } catch { payload = text; }
+        // If JSON objects/array lack tenantId, inject currentTenant
+        const ensureTenant = (obj) => ({ tenantId: currentTenant, ...obj });
+        if (Array.isArray(payload)) payload = payload.map(x => typeof x === "object" ? ensureTenant(x) : x);
+        else if (typeof payload === "object") payload = ensureTenant(payload);
+        const call = httpsCallable(functions, "importProspects");
+        const res = await call(payload);
+        alert("Imported: " + (res.data?.count || 0));
+      } catch (e) { alert("Import failed: " + e.message); }
+    };
+
+    document.getElementById("export").onclick = () => {
+      const rows2d = [["tenantId","institutionName","domain","product","region","timezone","lms","score","stage","whyNow","ownerName"]]
+        .concat(rows.map(p => [currentTenant,p.institutionName||"",p.domain||"",p.product||"",p.region||"",p.timezone||"",p.lms||"",p.score||0,p.stage||"", (p.whyNow||"").replace(/\n/g," "), p.ownerName||""]));
+      const csv = rows2d.map(r => r.map(v => `"${(v??"").toString().replaceAll('"','""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], {type:"text/csv"});
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: "prospects.csv" });
+      a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+    };
+  </script>
+</body>
+</html>
