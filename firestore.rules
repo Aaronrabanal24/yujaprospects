@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function authed() { return request.auth != null; }
+    function rolesDoc() { return get(/databases/$(db)/documents/roles/$(request.auth.uid)); }
+    function hasTenant(tid) { return rolesDoc().data.tenants[tid] in ['viewer','sdr','admin']; }
+    function isAdmin(tid)  { return rolesDoc().data.tenants[tid] == 'admin'; }
+    function owns(resource) { return resource.data.ownerUid == request.auth.uid; }
+    function isClaim(request, resource) {
+      return resource.data.ownerUid == null && request.resource.data.ownerUid == request.auth.uid;
+    }
+
+    // Tenant-scoped prospects + subcollections
+    match /tenants/{tid}/prospects/{pid} {
+      allow read: if authed() && hasTenant(tid);
+      allow create, update, delete: if authed() && (isAdmin(tid) || owns(resource) || isClaim(request, resource));
+    }
+
+    match /tenants/{tid}/prospects/{pid}/{sub=contacts|signals|activities}/{sid} {
+      allow read: if authed() && hasTenant(tid);
+      allow create, update, delete: if authed() && (isAdmin(tid) || owns(get(/databases/$(db)/documents/tenants/$(tid)/prospects/$(pid))));
+    }
+
+    // Roles collection (editable by global admins only; keep minimal surface)
+    match /roles/{uid} {
+      allow read: if authed() && request.auth.uid == uid;           // users can read their own role doc
+      allow write: if authed() && rolesDoc().data.tenants['global'] == 'admin';
+    }
+
+    // Round-robin + admin routing per tenant
+    match /routing/{tenantRegion} {
+      allow read, write: if authed() && rolesDoc().data.tenants['global'] == 'admin';
+    }
+
+    match /audit/{aid} {
+      allow read: if authed() && rolesDoc().data.tenants['global'] == 'admin';
+      allow write: if authed();
+    }
+  }
+}
